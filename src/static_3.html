@@ -1,0 +1,222 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8">
+  <title>Hyperspace shader 3</title>
+  <style>
+    body, html { margin:0; padding:0; overflow:hidden; }
+    canvas { display:block; width:100vw; height:100vh; }
+  </style>
+</head>
+<body>
+  <canvas id="glcanvas"></canvas>
+  <script src="https://dev.fhnb.ru/assets/view/GL-MATRIX/2.8.1/f/gl-matrix-min.js"></script>
+  <script>
+  (function(){
+    const JS_PI = Math.PI;
+    let yaw=0, pitch=0;
+    let isDown=false, lastX=0, lastY=0;
+
+    // ——— Canvas & GL
+    const canvas = document.getElementById('glcanvas');
+    const gl = canvas.getContext('webgl');
+    if(!gl) return alert('WebGL не поддерживается');
+
+    // ——— Resize
+    function resize(){
+      canvas.width  = innerWidth;
+      canvas.height = innerHeight;
+      gl.viewport(0,0,canvas.width,canvas.height);
+    }
+    window.addEventListener('resize', resize);
+    resize();
+
+    // ——— Pointer (мышь + тач)
+    canvas.addEventListener('pointerdown', e=>{
+      isDown=true; lastX=e.clientX; lastY=e.clientY;
+      canvas.setPointerCapture(e.pointerId);
+    });
+    canvas.addEventListener('pointermove', e=>{
+      if(!isDown) return;
+      const dx = e.clientX - lastX, dy = e.clientY - lastY;
+      lastX = e.clientX; lastY = e.clientY;
+      yaw   += dx * 0.005;
+      pitch += dy * 0.005;
+      pitch = Math.max(-JS_PI/2, Math.min(JS_PI/2, pitch));
+    });
+    canvas.addEventListener('pointerup',    e=>{ isDown=false; canvas.releasePointerCapture(e.pointerId); });
+    canvas.addEventListener('pointercancel',e=>{ isDown=false; });
+
+    // ——— Шейдеры
+    const VSH = `
+      attribute vec3 a_pos;
+      attribute vec3 a_norm;
+      uniform mat4 u_modelView;
+      uniform mat4 u_proj;
+      uniform mat3 u_normMat;
+      varying vec3 v_dir;
+      void main(){
+        gl_Position = u_proj * u_modelView * vec4(a_pos,1.0);
+        // нормаль наружу, инвертим её для Mapping’а
+        v_dir = -normalize(u_normMat * a_norm);
+      }
+    `;
+    const FSH = `
+      precision mediump float;
+      uniform sampler2D u_noise;
+      uniform float     u_time;
+      varying vec3      v_dir;
+      const float PI = 3.14159265;
+      void main(){
+        // динамический оффсет и масштаб
+        float t = u_time * 0.1;
+        vec2 off = vec2(t, -t);
+        float scale = 2.0;
+
+        // tri‑planar mapping
+        vec3 d = normalize(v_dir);
+        vec3 ad = abs(d);
+        vec3 w = ad / (ad.x + ad.y + ad.z);
+
+        float sx = texture2D(u_noise, fract(d.yz * scale + off)).r;
+        float sy = texture2D(u_noise, fract(d.zx * scale + off)).r;
+        float sz = texture2D(u_noise, fract(d.xy * scale + off)).r;
+
+        float n = sx*w.x + sy*w.y + sz*w.z;
+        n = smoothstep(0.2, 0.8, n);
+
+        vec3 col = mix(vec3(0.0), vec3(1.0,0.0,0.0), n);
+        gl_FragColor = vec4(col,1.0);
+      }
+    `;
+
+    // ——— Утилиты
+    function compile(src, type){
+      const s = gl.createShader(type);
+      gl.shaderSource(s, src);
+      gl.compileShader(s);
+      if(!gl.getShaderParameter(s,type))
+        console.error(gl.getShaderInfoLog(s));
+      return s;
+    }
+    const vs = compile(VSH, gl.VERTEX_SHADER),
+          fs = compile(FSH, gl.FRAGMENT_SHADER);
+    const prog = gl.createProgram();
+    gl.attachShader(prog, vs);
+    gl.attachShader(prog, fs);
+    gl.linkProgram(prog);
+    if(!gl.getProgramParameter(prog,gl.LINK_STATUS))
+      console.error(gl.getProgramInfoLog(prog));
+    gl.useProgram(prog);
+
+    // ——— Генерация UV‑sphere (radius=1), нормали наружу
+    let pos = [], norm = [], idx = [];
+    (function(lat=40, lon=40){
+      for(let i=0;i<=lat;i++){
+        let θ = i/lat * JS_PI;
+        let sθ = Math.sin(θ), cθ = Math.cos(θ);
+        for(let j=0;j<=lon;j++){
+          let φ = j/lon * 2*JS_PI;
+          let sφ = Math.sin(φ), cφ = Math.cos(φ);
+          let x = sθ*cφ, y = cθ, z = sθ*sφ;
+          pos.push(x,y,z);
+          norm.push(x,y,z);  // нормали наружу
+        }
+      }
+      for(let i=0;i<lat;i++){
+        for(let j=0;j<lon;j++){
+          let a = i*(lon+1)+j;
+          let b = a + (lon+1);
+          idx.push(a, b, a+1,  b, b+1, a+1);
+        }
+      }
+    })();
+
+    // ——— Буферы
+    function enableAttr(data, size, name){
+      const buf = gl.createBuffer();
+      gl.bindBuffer(gl.ARRAY_BUFFER, buf);
+      gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(data), gl.STATIC_DRAW);
+      const loc = gl.getAttribLocation(prog,name);
+      gl.enableVertexAttribArray(loc);
+      gl.vertexAttribPointer(loc,size,gl.FLOAT,false,0,0);
+    }
+    enableAttr(pos, 3, 'a_pos');
+    enableAttr(norm,3,'a_norm');
+    const ibo = gl.createBuffer();
+    gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, ibo);
+    gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, new Uint16Array(idx), gl.STATIC_DRAW);
+
+    // ——— Uniform‑локации
+    const U = {
+      modelView: gl.getUniformLocation(prog,'u_modelView'),
+      proj:      gl.getUniformLocation(prog,'u_proj'),
+      normMat:   gl.getUniformLocation(prog,'u_normMat'),
+      time:      gl.getUniformLocation(prog,'u_time'),
+      noise:     gl.getUniformLocation(prog,'u_noise'),
+    };
+
+    // ——— Настройки WebGL
+    gl.disable(gl.CULL_FACE);      // рендерим обе стороны
+    gl.enable(gl.DEPTH_TEST);
+
+    // ——— Загружаем текстуру шума
+    const tex = gl.createTexture();
+    const img = new Image();
+    img.src = 'noise.png';
+    img.onload = ()=>{
+      gl.bindTexture(gl.TEXTURE_2D, tex);
+      gl.texImage2D(gl.TEXTURE_2D, 0, gl.LUMINANCE,
+                    gl.LUMINANCE, gl.UNSIGNED_BYTE, img);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S,     gl.REPEAT);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T,     gl.REPEAT);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+      gl.uniform1i(U.noise, 0);
+      requestAnimationFrame(draw);
+    };
+
+    // ——— Матрицы
+    const mvMat = mat4.create(),
+          prMat = mat4.create(),
+          nmMat = mat3.create();
+    const start = performance.now();
+
+    function draw(){
+      const now = (performance.now() - start) * 0.00024;
+      gl.clearColor(0,0,0,1);
+      gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
+
+      // 1) Проекция
+      mat4.perspective(prMat,
+        60 * JS_PI/180,
+        canvas.width / canvas.height,
+        0.01, 100.0
+      );
+
+      // 2) ModelView: сначала сдвигаем сферу чуть назад, потом крутим
+      mat4.identity(mvMat);
+      mat4.translate(mvMat, mvMat, [0,0,-(1.0 - 0.01)]); // radius=1, near=0.01
+      mat4.rotateY(mvMat, mvMat, yaw);
+      mat4.rotateX(mvMat, mvMat, pitch);
+
+      // 3) Normal matrix
+      mat3.normalFromMat4(nmMat, mvMat);
+
+      // 4) Передаём униформы
+      gl.uniformMatrix4fv(U.proj,      false, prMat);
+      gl.uniformMatrix4fv(U.modelView, false, mvMat);
+      gl.uniformMatrix3fv(U.normMat,   false, nmMat);
+      gl.uniform1f(U.time, now);
+
+      // 5) Рисуем
+      gl.activeTexture(gl.TEXTURE0);
+      gl.bindTexture(gl.TEXTURE_2D, tex);
+      gl.drawElements(gl.TRIANGLES, idx.length, gl.UNSIGNED_SHORT, 0);
+
+      requestAnimationFrame(draw);
+    }
+  })();
+  </script>
+</body>
+</html>

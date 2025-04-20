@@ -1,0 +1,138 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8">
+  <title>Hyperspace shader</title>
+  <style>
+    body, html { margin:0; overflow:hidden; }
+    canvas { display:block; width:100vw; height:100vh; }
+  </style>
+</head>
+<body>
+  <canvas id="glcanvas"></canvas>
+  <script>
+// ——— Инициализация WebGL ———
+const canvas = document.getElementById('glcanvas');
+const gl = canvas.getContext('webgl');
+if (!gl) alert('WebGL не поддерживается');
+
+// подгоняем холст под окно
+function resize() {
+  canvas.width = innerWidth;
+  canvas.height = innerHeight;
+  gl.viewport(0, 0, gl.drawingBufferWidth, gl.drawingBufferHeight);
+}
+window.addEventListener('resize', resize);
+resize();
+
+// компилятор шейдеров
+function compile(src, type){
+  const sh = gl.createShader(type);
+  gl.shaderSource(sh, src);
+  gl.compileShader(sh);
+  if(!gl.getShaderParameter(sh, gl.COMPILE_STATUS))
+    console.error(gl.getShaderInfoLog(sh));
+  return sh;
+}
+
+// наш вершинник – просто квад на весь экран
+const vertSrc = `
+attribute vec2 a_pos;
+void main() {
+  gl_Position = vec4(a_pos, 0.0, 1.0);
+}
+`;
+
+// фрагментник – с “гонкой” по тайлабл‑noize
+const fragSrc = `
+precision mediump float;
+
+uniform float u_time;
+uniform vec2 u_resolution;
+uniform sampler2D u_noise;
+
+void main(){
+  vec2 uv = gl_FragCoord.xy / u_resolution;
+  // масштабим UV, чтобы шум не слишком растянут
+  vec2 uv1 = uv * 2.0 - 0.5;
+  vec2 uv2 = uv * 3.0 + 0.3;
+  
+  // анимируем смещение
+  float t = u_time * 0.1;
+  // две выборки разного масштаба+скорости
+  float n1 = texture2D(u_noise, fract(uv1 + vec2( t, -t))).r;
+  float n2 = texture2D(u_noise, fract(uv2 + vec2(-t,  t))).r;
+  // миксуем, чтобы создать интересную динамику
+  float n = mix(n1, n2, 0.5);
+  
+  // подтягиваем контраст (smoothstep можно варить)
+  n = smoothstep(0.2, 0.8, n);
+  
+  // раскрашиваем: чёрно → красно
+  vec3 color = mix(vec3(0.0), vec3(1.0, 0.0, 0.0), n);
+  gl_FragColor = vec4(color, 1.0);
+}
+`;
+
+// компилируем и линкуем
+const vs = compile(vertSrc, gl.VERTEX_SHADER);
+const fs = compile(fragSrc, gl.FRAGMENT_SHADER);
+const prog = gl.createProgram();
+gl.attachShader(prog, vs);
+gl.attachShader(prog, fs);
+gl.linkProgram(prog);
+if(!gl.getProgramParameter(prog, gl.LINK_STATUS))
+  console.error(gl.getProgramInfoLog(prog));
+gl.useProgram(prog);
+
+// буфер для полного экрана
+const quad = gl.createBuffer();
+gl.bindBuffer(gl.ARRAY_BUFFER, quad);
+gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([
+  -1,-1,  1,-1,  -1,1,
+   1,-1,  1,1,   -1,1
+]), gl.STATIC_DRAW);
+
+const a_pos = gl.getAttribLocation(prog, 'a_pos');
+gl.enableVertexAttribArray(a_pos);
+gl.vertexAttribPointer(a_pos, 2, gl.FLOAT, false, 0, 0);
+
+// юниформы
+const u_time       = gl.getUniformLocation(prog, 'u_time');
+const u_resolution = gl.getUniformLocation(prog, 'u_resolution');
+const u_noise      = gl.getUniformLocation(prog, 'u_noise');
+
+// загружаем тайлабл‑noise‑текстуру
+var tex = gl.createTexture();
+var img = new Image();
+img.src = 'noise.png';
+img.onload = () => {
+  console.log("Текстура загружена!", img.width, img.height);
+  gl.bindTexture(gl.TEXTURE_2D, tex);
+  gl.texImage2D(gl.TEXTURE_2D, 0, gl.LUMINANCE,
+                gl.LUMINANCE, gl.UNSIGNED_BYTE, img);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.REPEAT);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.REPEAT);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+  loop();
+};
+
+// рендер‑луп
+let start = performance.now();
+function loop(){
+  const now = performance.now();
+  gl.uniform1f(u_time, (now - start) * 0.0002);
+  gl.uniform2f(u_resolution, canvas.width, canvas.height);
+
+  gl.activeTexture(gl.TEXTURE0);
+  gl.bindTexture(gl.TEXTURE_2D, tex);
+  gl.uniform1i(u_noise, 0);
+
+
+  gl.drawArrays(gl.TRIANGLES, 0, 6);
+  requestAnimationFrame(loop);
+}
+  </script>
+</body>
+</html>
