@@ -122,7 +122,7 @@ img.onload = () => {
 let start = performance.now();
 function loop(){
   const now = performance.now();
-  gl.uniform1f(u_time, (now - start) * 0.0002);
+  gl.uniform1f(u_time, (now - start) * 0.00016);
   gl.uniform2f(u_resolution, canvas.width, canvas.height);
 
   gl.activeTexture(gl.TEXTURE0);

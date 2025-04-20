@@ -1,0 +1,233 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<title>Hyperspace shader 360° 2</title>
+<style>
+  html,body{margin:0;height:100%;overflow:hidden}
+  canvas{width:100%;height:100%;display:block;touch-action:none;cursor:grab}
+  canvas:active{cursor:grabbing}
+</style>
+</head>
+<body>
+<canvas id="gl"></canvas>
+<script src="https://dev.fhnb.ru/assets/view/GL-MATRIX/2.8.1/f/gl-matrix-min.js"></script>
+<script>
+(()=>{                  /* ---------- утилиты ---------- */
+  const gl=document.getElementById('gl').getContext('webgl');
+  const canvas=document.getElementById('gl').getContext('webgl');
+if(!gl){alert('WebGL?');return;}
+
+function compile(src,type){
+  const sh=gl.createShader(type);
+  gl.shaderSource(sh,src); gl.compileShader(sh);
+  if(!gl.getShaderParameter(sh,gl.COMPILE_STATUS))
+    throw new Error(gl.getShaderInfoLog(sh));
+  return sh;
+}
+function program(vsSrc,fsSrc){
+  const p=gl.createProgram();
+  gl.attachShader(p,compile(vsSrc,gl.VERTEX_SHADER));
+  gl.attachShader(p,compile(fsSrc,gl.FRAGMENT_SHADER));
+  gl.linkProgram(p);
+  if(!gl.getProgramParameter(p,gl.LINK_STATUS))
+    throw new Error(gl.getProgramInfoLog(p));
+  return p;
+}
+function buffer(data,attr,size){
+  const b=gl.createBuffer();
+  gl.bindBuffer(gl.ARRAY_BUFFER,b);
+  gl.bufferData(gl.ARRAY_BUFFER,new Float32Array(data),gl.STATIC_DRAW);
+  const loc=gl.getAttribLocation(prog,attr);
+  gl.enableVertexAttribArray(loc);
+  gl.vertexAttribPointer(loc,size,gl.FLOAT,false,0,0);
+}
+                         /* ---------- шейдеры ---------- */
+const VS=`
+attribute vec3 a_pos;
+attribute vec3 a_norm;
+uniform mat4 u_vp;          // proj*view
+varying vec3 v_dir;
+void main(){
+  gl_Position = u_vp * vec4(a_pos,1.0);
+  v_dir = -normalize(a_norm);   // внутрь сферы
+}`;
+const FS=`
+precision mediump float;
+
+uniform float u_time;
+varying vec3 v_dir;
+
+// Fade-функция от Кен Перлина
+float fade(float t) {
+    return t * t * t * (t * (t * 6.0 - 15.0) + 10.0);
+}
+
+// Хэш для 2D: превращаем координаты в псевдослучайный градиент
+vec2 hash2(vec2 p) {
+    p = vec2(
+        dot(p, vec2(127.1, 311.7)),
+        dot(p, vec2(269.5, 183.3))
+    );
+    return -1.0 + 2.0 * fract(sin(p) * 43758.5453123);
+}
+
+// Классический 2D Перлин
+float perlin(in vec2 p) {
+    vec2 i = floor(p);
+    vec2 f = fract(p);
+    vec2 u = vec2(fade(f.x), fade(f.y));
+    
+    vec2 g00 = hash2(i + vec2(0.0, 0.0));
+    vec2 g10 = hash2(i + vec2(1.0, 0.0));
+    vec2 g01 = hash2(i + vec2(0.0, 1.0));
+    vec2 g11 = hash2(i + vec2(1.0, 1.0));
+    
+    float n00 = dot(g00, f - vec2(0.0, 0.0));
+    float n10 = dot(g10, f - vec2(1.0, 0.0));
+    float n01 = dot(g01, f - vec2(0.0, 1.0));
+    float n11 = dot(g11, f - vec2(1.0, 1.0));
+    
+    float nx0 = mix(n00, n10, u.x);
+    float nx1 = mix(n01, n11, u.x);
+    return mix(nx0, nx1, u.y);
+}
+
+// fBm: суммируем несколько октав
+float fbm(in vec2 p) {
+    const int OCTAVES = 4;
+    float amp = 1.0;
+    float freq = 1.0;
+    float sum = 0.0;
+    float norm = 0.0;
+    for (int i = 0; i < OCTAVES; i++) {
+        sum += perlin(p * freq) * amp;
+        norm += amp;
+        freq *= 2.0;    // удваиваем частоту
+        amp *= 0.5;     // уменьшаем амплитуду
+    }
+    return sum / norm;
+}
+
+void main(){
+    float t = u_time * 0.2;
+    vec2 off = vec2(t, -t);
+    float scale = 10.0;
+
+    vec3 d = normalize(v_dir);
+    vec3 a = abs(d);
+    vec3 w = a / (a.x + a.y + a.z);
+    
+    // Берём Перлин вместо texture2D
+    float sx = fbm(d.yz * scale + off) * 0.5 + 0.5;
+    float sy = fbm(d.zx * scale + off) * 0.5 + 0.5;
+    float sz = fbm(d.xy * scale + off) * 0.5 + 0.5;
+    
+    float n = smoothstep(0.2, 0.8, sx * w.x + sy * w.y + sz * w.z);
+    gl_FragColor = vec4(mix(vec3(0.0), vec3(1.0, 0.0, 0.0), n), 1.0);
+}
+`;
+const prog=program(VS,FS);
+gl.useProgram(prog);
+gl.uniform2f(gl.getUniformLocation(prog, 'u_resolution'),
+             canvas.width, canvas.height);
+gl.uniform1f(gl.getUniformLocation(prog, 'u_time'), 0.0);
+
+                       /* ---------- сфера ---------- */
+const lat=40, lon=40;
+const pos=[], norm=[], idx=[];
+for(let i=0;i<=lat;i++){
+  const th=i/lat*Math.PI,  s=Math.sin(th), c=Math.cos(th);
+  for(let j=0;j<=lon;j++){
+    const ph=j/lon*2*Math.PI, s2=Math.sin(ph), c2=Math.cos(ph);
+    const x=s*c2, y=c, z=s*s2;
+    pos.push(x,y,z); norm.push(x,y,z);
+  }
+}
+for(let i=0;i<lat;i++)for(let j=0;j<lon;j++){
+  const a=i*(lon+1)+j, b=a+lon+1;
+  idx.push(a,b,a+1, b,b+1,a+1);
+}
+buffer(pos,'a_pos',3); buffer(norm,'a_norm',3);
+const ibo=gl.createBuffer();
+gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER,ibo);
+gl.bufferData(gl.ELEMENT_ARRAY_BUFFER,new Uint16Array(idx),gl.STATIC_DRAW);
+
+                       /* ---------- текстура шума ---------- */
+/*const tex=gl.createTexture(); const img=new Image();
+img.src='noise.png';
+img.onload=()=>{gl.bindTexture(gl.TEXTURE_2D,tex);
+  gl.texImage2D(gl.TEXTURE_2D,0,gl.LUMINANCE,gl.LUMINANCE,gl.UNSIGNED_BYTE,img);
+  gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_WRAP_S,gl.REPEAT);
+  gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_WRAP_T,gl.REPEAT);
+  gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_MIN_FILTER,gl.LINEAR);
+  gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_MAG_FILTER,gl.LINEAR);
+  gl.uniform1i(gl.getUniformLocation(prog,'u_noise'),0);
+  requestAnimationFrame(loop);
+};*/
+
+                       /* ---------- управление ---------- */
+let yaw=0,pitch=0,isDrag=false,px=0,py=0;
+const TAU=Math.PI*2;
+
+function beginDrag(x,y){isDrag=true;px=x;py=y;}
+function moveDrag(x,y){
+  if(!isDrag) return;
+  const dx=x-px, dy=y-py;
+  px=x; py=y;
+  yaw   =(yaw+dx*0.002)%TAU;
+  pitch =Math.max(-Math.PI/2,Math.min(Math.PI/2,pitch+dy*0.002));
+}
+function endDrag(){isDrag=false;}
+
+['pointerdown','mousedown'].forEach(ev=>
+  gl.canvas.addEventListener(ev, e=>beginDrag(e.clientX,e.clientY)));
+['pointermove','mousemove'].forEach(ev=>
+  window.addEventListener(ev,  e=>moveDrag (e.clientX,e.clientY)));
+['pointerup','mouseup','pointercancel','mouseleave'].forEach(ev=>
+  window.addEventListener(ev,  endDrag));
+
+gl.canvas.addEventListener('touchstart',e=>{
+  const t=e.touches[0]; beginDrag(t.clientX,t.clientY); e.preventDefault();
+},{passive:false});
+gl.canvas.addEventListener('touchmove', e=>{
+  const t=e.touches[0]; moveDrag(t.clientX,t.clientY);  e.preventDefault();
+},{passive:false});
+gl.canvas.addEventListener('touchend',  e=>{endDrag(); e.preventDefault();},{passive:false});
+
+                         /* ---------- цикл рисования ---------- */
+gl.enable(gl.DEPTH_TEST); gl.disable(gl.CULL_FACE);
+function resize(){gl.canvas.width=innerWidth;gl.canvas.height=innerHeight;}
+window.addEventListener('resize',resize); resize();
+
+const loc_vp  = gl.getUniformLocation(prog,'u_vp');
+const loc_time= gl.getUniformLocation(prog,'u_time');
+const t0 = performance.now();
+
+let start = performance.now();
+function loop(){
+  const t=(performance.now()-t0)*0.00032;
+  gl.uniform1f(gl.getUniformLocation(prog, 'u_time'), t);
+  gl.viewport(0,0,gl.canvas.width,gl.canvas.height);
+  gl.clearColor(0,0,0,1); gl.clear(gl.COLOR_BUFFER_BIT|gl.DEPTH_BUFFER_BIT);
+
+  const view=mat4.create();
+  mat4.rotateX(view,view,-pitch);
+  mat4.rotateY(view,view,-yaw);
+
+  const proj=mat4.create();
+  mat4.perspective(proj,60*Math.PI/180,gl.canvas.width/gl.canvas.height,0.01,100);
+
+  const vp=mat4.create(); mat4.multiply(vp,proj,view);
+  gl.uniformMatrix4fv(loc_vp,false,vp);
+  gl.uniform1f(loc_time,t);
+  gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+
+  gl.drawElements(gl.TRIANGLES,idx.length,gl.UNSIGNED_SHORT,0);
+  requestAnimationFrame(loop);
+}
+requestAnimationFrame(loop);
+})();
+</script>
+</body>
+</html>
